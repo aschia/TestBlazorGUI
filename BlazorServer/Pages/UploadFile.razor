@@ -1,0 +1,276 @@
+﻿@page "/uploadfile"
+@using System.IO
+@inject IWebHostEnvironment env
+@using Microsoft.Extensions.Configuration
+@inject IConfiguration Configuration
+
+@using Microsoft.AspNetCore.Components.Forms;
+@using Renci.SshNet
+@using SixLabors.ImageSharp
+@using SixLabors.ImageSharp.PixelFormats
+@using SixLabors.ImageSharp.Processing
+@using SixLabors.ImageSharp.Formats
+
+@inject IJSRuntime JSRuntime
+
+<h1>Mower File Upload</h1>
+
+<form @onsubmit="OnSubmit">
+    <label>
+        Pi IP Address: 
+    </label><input type="text" @bind="piIpAddress" /><br />
+    <label>
+        Remote File Path: 
+    </label><input type="text" @bind="remoteFilePath" /><br />
+    <label>
+        Remote Username: 
+    </label><input type="text" @bind="remoteUsername" /><br />
+    <label>
+        Remote Password: 
+    </label><input type="password" @bind="remotePassword" /><br />
+    <label>
+        Pick a file to Upload: 
+    </label>
+    <br />
+    <InputFile OnChange="OnInputFileChange" accept=".BMP,.JPG,.GIF,.PNG,.TIF" />
+    <br />
+    <button type="button" @onclick="DoFileUpload">Upload File</button>
+    <img src="/images/@imageFileName?ver='@DateTime.Now.Ticks.ToString()' " />
+    <br />
+    <!--
+    <input type="number" @bind="resizeLength" /><input type="number" @bind="resizeHeight" />
+    <button type="button" @onclick="ResizeImage">Resize Image</button>
+    <br />
+    -->
+    <button type="button" @onclick="MakeImageGreyscale">Make Image Greyscale</button>
+    <hr />
+    <button type="submit">Send File to Remote System</button>
+    <!--  <button class="btn btn-primary" @onclick="Alert"> Alert Me!</button> -->
+</form>
+
+<h3>@Message</h3>
+
+@code {
+    public string Message = "No file(s) selected";
+    IReadOnlyList<IBrowserFile> selectedFiles;
+    private string piIpAddress = "";
+    private string localFilePath = @"../../../data/processImage.png";
+    private string remoteFilePath = "";
+    private string remoteUsername = "";
+    private string remotePassword = "";
+    private string imageLocalFilePath = "";
+    private string imageFileName = "";
+    const int MAXALLOWEDSIZE = 50000000;
+    private int resizeLength = 1024;
+    private int resizeHeight = 768;
+
+    protected override async Task OnInitializedAsync()
+    {
+        // TODO:Make this read from the config settings
+        piIpAddress = Configuration.GetSection("AppSettings")["PiIpAddress"] ?? "192.168.1.30";
+        remoteFilePath = Configuration.GetSection("AppSettings")["RemoteFilePath"] ?? "/home/pi/Desktop";
+        remoteUsername = Configuration.GetSection("AppSettings")["RemoteUsername"] ?? "username";
+        remotePassword = Configuration.GetSection("AppSettings")["RemotePassword"] ?? "password";
+    }
+    void OnInputFileChange(InputFileChangeEventArgs e)
+    {
+        selectedFiles = e.GetMultipleFiles();
+        Message = $"{selectedFiles.Count} file(s) selected";
+        this.StateHasChanged();
+    }
+
+    //string message = "";
+    public async Task Alert(string message)
+    {
+        await JSRuntime.InvokeAsync<object>("Alert", message);
+    }
+
+    private async void DoFileUpload()
+    {
+        if (selectedFiles == null)
+        {
+            await Alert("Please select a local file first.");
+        }
+        else
+        {
+            var filePaths = new List<string>();
+            foreach (var file in selectedFiles)
+            {
+                // Upload the file to the local machine
+                Stream stream = file.OpenReadStream(MAXALLOWEDSIZE);
+                var path = $"{env.WebRootPath}\\images\\{file.Name}";
+                FileStream fs = File.Create(path);
+                filePaths.Add(path);
+                await stream.CopyToAsync(fs);
+                stream.Close();
+                fs.Close();
+            }
+            imageLocalFilePath = filePaths?[0];
+            // FileInfo fi = new FileInfo(imageLocalFilePath);
+            imageFileName = Path.GetFileName(imageLocalFilePath); // fi.Name;
+            Message = $"{selectedFiles.Count} file(s) uploaded on server : {imageFileName}";
+            this.StateHasChanged();
+        }
+    }
+
+    async void OnSubmit()
+    {
+        if (imageLocalFilePath == null)
+        {
+            await Alert("Please upload a file first.");
+        }
+        else
+        {
+            /*
+            // make grayscale, save to data
+            Bitmap bitm = new Bitmap(picbUpload.Image);
+            bitm = MakeGrayscale(bitm);
+            Image im = (Image)(bitm);
+            im.Save("../../../data/processImage.png");
+            */
+
+            // do the stuff to send it to the next layer
+            // Upload file to Raspberry Pi via SCP Client (Use SSH.NET)
+            using (ScpClient client = new ScpClient(piIpAddress, remoteUsername, remotePassword))
+            {
+                try
+                {
+                    client.Connect();
+
+                    using (Stream localFile = File.OpenRead(localFilePath))
+                    {
+                        client.Upload(localFile, remoteFilePath);
+                        Message = $"{imageFileName} was successfully sent to Remote IP ({piIpAddress}).";
+                    }
+                }
+                catch (Exception ex)
+                {
+                    //MessageBox.Show(ex.Message);
+                    Message = $"{imageFileName} could not be sent to Remote IP ({piIpAddress}).";
+                    await Alert(ex.Message);
+                }
+            }
+
+            this.StateHasChanged();
+        }
+
+    }
+
+    private void MakeImageGreyscale()
+    {
+        if (imageLocalFilePath == null)
+        {
+            Alert("Please upload a file first.");
+        }
+        else
+        {
+            string inputPath = imageLocalFilePath;
+            // Just replace it
+            string outputPath = imageLocalFilePath; // $"{imageLocalFilePath}";
+            if (inputPath != "" && Image.Load(inputPath) != null) {
+                using (Image image = Image.Load(inputPath))
+                {
+                    //var image = Image.Load(byteArray);            
+                    //image.Mutate(x => x.Grayscale(GrayscaleMode.Bt601, 1 ));
+                    image.Mutate(x => x.BlackWhite());
+
+                    // The library automatically picks an encoder based on the file extension then
+                    // encodes and write the data to disk.
+                    // You can optionally set the encoder to choose.
+                    image.Save(outputPath);
+                } // Dispose - releasing memory into a memory pool ready for the next image you wish to process.
+
+                imageLocalFilePath = outputPath;
+                this.StateHasChanged();
+            }
+        }
+    }
+
+    private void ResizeImage()
+    {
+        if (imageLocalFilePath == null)
+        {
+            Alert("Please upload a file first.");
+        }
+        else
+        {
+            string inputPath = imageLocalFilePath;
+            // Just replace it
+            string outputPath = imageLocalFilePath; // $"{imageLocalFilePath}";
+            using (Image image = Image.Load(inputPath))
+            {
+                // Resize the image in place and return it for chaining.
+                // 'x' signifies the current image processing context.
+                //image.Mutate(x => x.Resize(image.Width / 2, image.Height / 2));
+                image.Mutate(x => x.Resize(resizeLength, resizeHeight));
+
+                // The library automatically picks an encoder based on the file extension then
+                // encodes and write the data to disk.
+                // You can optionally set the encoder to choose.
+                image.Save(outputPath);
+            } // Dispose - releasing memory into a memory pool ready for the next image you wish to process.
+
+            imageLocalFilePath = outputPath;
+            this.StateHasChanged();
+        }
+    }
+    /*
+    private Image MakeImageGreyscale2()
+    {
+        //byte[] arr = MnistReader.ReadTestData(); //this gives me byte[] with 784 pixel values
+
+        using (Image image = Image.Load(imageLocalFilePath))
+        {
+            Image outputImage = Image.Load<Rbga32>(imageLocalFilePath);
+            for (int i = 0; i < image.Height; i++)
+            {
+                for (int j = 0; j < image.Width; j++)
+                {
+                    int curPixel = j + i * image.Width;
+                    image.[curPixel].R = arr[curPixel];
+                    image.Pixels[curPixel].G = arr[curPixel];
+                    image.Pixels[curPixel].B = arr[curPixel];
+                }
+            }
+
+            return outputImage;
+        }
+    }
+    */
+   /*
+    private Bitmap MakeGrayscale(Bitmap bp)
+        {
+        // setup
+        int width = bp.Width;
+        int height = bp.Height;
+        Color p;
+
+        // go thru x values
+        for (int x = 0; x < width; x++)
+            {
+            // go thru y values
+            for (int y = 0; y < height; y++)
+                {
+                // get pixel value
+                p = bp.GetPixel(x, y);
+
+                // extract color component values
+                int a = p.A;
+                int r = p.R;
+                int g = p.G;
+                int b = p.B;
+
+                //find average
+                int avg = (r + g + b) / 3;
+
+                // set new pixel value
+                bp.SetPixel(x, y, Color.FromArgb(a, avg, avg, avg));
+                }
+        }
+
+        // return modified bitmap
+    return bp;
+        }
+    */
+
+}
